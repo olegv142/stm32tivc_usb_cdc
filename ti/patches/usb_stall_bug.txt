@@ -1,0 +1,149 @@
+Hello,
+
+I have a great experience using MP430 series MCU in various commercial projects. They always work flawlessly for me. Now I'm considering using Tiva C series for application implementing some proprietary communication protocol over USB CDC channel. Experimenting with EK-TM4C123GXL launch pad I was surprised by the fact that TivaWare USB library just does not work as expected. Below is the description of the problem and patches fixing it.
+
+I've created simple test application based on the supplied usb_dev_serial example with few lines of my own code sending echo back to the host:
+
+    //
+    // Initialize the transmit and receive buffers.
+    //
+    USBBufferInit(&g_sTxBuffer);
+    USBBufferInit(&g_sRxBuffer);
+    USBBufferZeroLengthPacketInsert(&g_sTxBuffer, true);
+
+    //
+    // Set the USB stack mode to Device mode with VBUS monitoring.
+    //
+    USBStackModeSet(0, eUSBModeForceDevice, 0);
+
+    //
+    // Pass our device information to the USB library and place the device
+    // on the bus.
+    //
+    USBDCDCInit(0, &g_sCDCDevice);
+
+    //
+    // Main application loop.
+    //
+    while(1)
+    {
+		uint32_t space_avail;
+		uint8_t  buff[USB_BUFFER_SIZE];
+		if (USBBufferDataAvailable(&g_sRxBuffer) && (space_avail = USBBufferSpaceAvailable(&g_sTxBuffer))) {
+			uint32_t rd = USBBufferRead (&g_sRxBuffer, buff, space_avail);
+			uint32_t wr = USBBufferWrite(&g_sTxBuffer, buff, rd);
+			ASSERT(rd == wr);
+		}
+    }
+
+The test application running on the host is just sending random length buffers and reading back responses. The test stops rather quickly failing to read back response. So I had to dive into reading the library source code.
+
+The first thing I observed is that ScheduleNextTransmission function (usbbuffer.c) is calling from both ISR (when the current transmission ends) and main loop context (when the data is added to the transmit buffer). To ensure correctness the interrupts should be disabled at the beginning of this function in a manner similar to the UpdateIndexAtomic function.
+
+--- usbbuffer.c.1	2015-01-18 11:08:03.013606400 +0300
++++ usbbuffer.c	2015-01-18 11:07:19.329107800 +0300
+@@ -26,6 +26,7 @@
+ #include <stdint.h>
+ #include "inc/hw_types.h"
+ #include "driverlib/debug.h"
++#include "driverlib/interrupt.h"
+ #include "usblib/usblib.h"
+ #include "usblib/usblibpriv.h"
+ 
+@@ -79,6 +80,8 @@
+     tUSBBufferVars *psBufVars;
+     uint32_t ui32Packet, ui32Space, ui32Total, ui32Sent;
+ 
++    bool bIntsOff = IntMasterDisable();
++
+     //
+     // Get a pointer to our workspace variables.
+     //
+@@ -188,6 +191,11 @@
+         // sure the packet was correctly transmitted.
+         //
+     }
++
++    if(!bIntsOff)
++    {
++        IntMasterEnable();
++    }
+ }
+
+The second problem I've found is zero-length packet handling. The USB_BUFFER_FLAG_SEND_ZLP flag is nice but it just does not work since the lower level code in ProcessDataToHost function (usbdcdc.c) sends the zero-sized packet anyway regardless of this flag. Moreover the latter code is redundant and may be easily dropped since the ScheduleNextTransmission function already takes care about sending zero length packets.
+
+I've found though that disabling zero-length packets confuses the windows CDC driver. Seems that it just stops receiving anything after failing to receive data in some USB time frame. So the zero length packets should be enabled.
+
+My third observation is that the zero-packet related code in ProcessDataToHost is the cause of the read stream stalling. Suppose the MCU is sending zero-length packet while the main loop code adds data to USB buffer. Since the transmitter is busy the data is being kept in buffer waiting the transmission end. But the ProcessDataToHost function does not notify upper layer (by calling pfnTxCallback) in case the last packet has zero size. So the data added to the USB buffer have no chance to be transmitted. The following patch fixes the problem so my test works flawlessly with it.
+
+--- usbdcdc.c.1	2015-01-18 12:02:49.869603800 +0300
++++ usbdcdc.c	2015-01-18 12:04:17.803633300 +0300
+@@ -1155,7 +1155,6 @@
+ {
+     tCDCSerInstance *psInst;
+     uint32_t ui32EPStatus, ui32Size;
+-    bool bSentFullPacket;
+ 
+     //
+     // Get a pointer to the CDC device instance data pointer
+@@ -1181,48 +1180,13 @@
+     psInst->iCDCTxState = eCDCStateIdle;
+ 
+     //
+-    // If this notification is not as a result of sending a zero-length packet,
+-    // call back to the client to let it know we sent the last thing it passed
+-    // us.
++    // Notify the client that the last transmission completed.
+     //
+-    if(psInst->ui16LastTxSize)
+-    {
+-        //
+-        // Have we just sent a 64 byte packet?
+-        //
+-        bSentFullPacket = (psInst->ui16LastTxSize == DATA_IN_EP_MAX_SIZE) ?
+-                           true : false;
+-
+-        //
+-        // Notify the client that the last transmission completed.
+-        //
+-        ui32Size = (uint32_t)psInst->ui16LastTxSize;
+-        psInst->ui16LastTxSize = 0;
+-        psCDCDevice->pfnTxCallback(psCDCDevice->pvTxCBData, USB_EVENT_TX_COMPLETE,
++    ui32Size = (uint32_t)psInst->ui16LastTxSize;
++    psInst->ui16LastTxSize = 0;
++    psCDCDevice->pfnTxCallback(psCDCDevice->pvTxCBData, USB_EVENT_TX_COMPLETE,
+                                 ui32Size, (void *)0);
+ 
+-        //
+-        // If we had previously sent a full packet and the callback didn't
+-        // schedule a new transmission, send a zero length packet to indicate
+-        // the end of the transfer.
+-        //
+-        if(bSentFullPacket && !psInst->ui16LastTxSize)
+-        {
+-            //
+-            // We can expect another transmit complete notification after doing
+-            // this.
+-            //
+-            psInst->iCDCTxState = eCDCStateWaitData;
+-
+-            //
+-            // Send the zero-length packet.
+-            //
+-            MAP_USBEndpointDataSend(psInst->ui32USBBase,
+-                                    psInst->ui8BulkINEndpoint,
+-                                    USB_TRANS_IN);
+-        }
+-    }
+-
+     return(true);
+ }
+ 
+Hope this information will help you to improve the quality of the USB library.
+With kind regards,
+
+Oleg Volkov
+Lead developer at
+Parallels Inc. http://www.parallels.com
+Terasense Inc. http://terasense.com/
+Enspectr Inc.  http://enspectr.com/

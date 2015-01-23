@@ -1,0 +1,77 @@
+--- C:\ti\TivaWare_C_Series-2.1.0.12573\usblib\device\usbdcdc.c	2015-01-21 10:33:39.028774200 +0300
++++ usbdcdc.c	2015-01-21 10:56:16.817435200 +0300
+@@ -21,6 +21,7 @@
+ // This is part of revision 2.1.0.12573 of the Tiva USB Library.
+ //
+ //*****************************************************************************
++#ifndef USB_UNPATCHED
+ 
+ #include <stdbool.h>
+ #include <stdint.h>
+@@ -1155,7 +1156,6 @@
+ {
+     tCDCSerInstance *psInst;
+     uint32_t ui32EPStatus, ui32Size;
+-    bool bSentFullPacket;
+ 
+     //
+     // Get a pointer to the CDC device instance data pointer
+@@ -1181,48 +1181,13 @@
+     psInst->iCDCTxState = eCDCStateIdle;
+ 
+     //
+-    // If this notification is not as a result of sending a zero-length packet,
+-    // call back to the client to let it know we sent the last thing it passed
+-    // us.
++    // Notify the client that the last transmission completed.
+     //
+-    if(psInst->ui16LastTxSize)
+-    {
+-        //
+-        // Have we just sent a 64 byte packet?
+-        //
+-        bSentFullPacket = (psInst->ui16LastTxSize == DATA_IN_EP_MAX_SIZE) ?
+-                           true : false;
+-
+-        //
+-        // Notify the client that the last transmission completed.
+-        //
+-        ui32Size = (uint32_t)psInst->ui16LastTxSize;
+-        psInst->ui16LastTxSize = 0;
+-        psCDCDevice->pfnTxCallback(psCDCDevice->pvTxCBData, USB_EVENT_TX_COMPLETE,
++    ui32Size = (uint32_t)psInst->ui16LastTxSize;
++    psInst->ui16LastTxSize = 0;
++    psCDCDevice->pfnTxCallback(psCDCDevice->pvTxCBData, USB_EVENT_TX_COMPLETE,
+                                 ui32Size, (void *)0);
+ 
+-        //
+-        // If we had previously sent a full packet and the callback didn't
+-        // schedule a new transmission, send a zero length packet to indicate
+-        // the end of the transfer.
+-        //
+-        if(bSentFullPacket && !psInst->ui16LastTxSize)
+-        {
+-            //
+-            // We can expect another transmit complete notification after doing
+-            // this.
+-            //
+-            psInst->iCDCTxState = eCDCStateWaitData;
+-
+-            //
+-            // Send the zero-length packet.
+-            //
+-            MAP_USBEndpointDataSend(psInst->ui32USBBase,
+-                                    psInst->ui8BulkINEndpoint,
+-                                    USB_TRANS_IN);
+-        }
+-    }
+-
+     return(true);
+ }
+ 
+@@ -3041,3 +3006,5 @@
+ //! @}
+ //
+ //*****************************************************************************
++
++#endif

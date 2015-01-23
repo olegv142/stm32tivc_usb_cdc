@@ -1,0 +1,43 @@
+--- C:\ti\TivaWare_C_Series-2.1.0.12573\usblib\usbbuffer.c	2015-01-21 10:33:38.857764400 +0300
++++ usbbuffer.c	2015-01-21 10:56:33.563393000 +0300
+@@ -22,10 +22,13 @@
+ //
+ //*****************************************************************************
+ 
++#ifndef USB_UNPATCHED
++
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include "inc/hw_types.h"
+ #include "driverlib/debug.h"
++#include "driverlib/interrupt.h"
+ #include "usblib/usblib.h"
+ #include "usblib/usblibpriv.h"
+ 
+@@ -79,6 +82,8 @@
+     tUSBBufferVars *psBufVars;
+     uint32_t ui32Packet, ui32Space, ui32Total, ui32Sent;
+ 
++    bool bIntsOff = IntMasterDisable();
++
+     //
+     // Get a pointer to our workspace variables.
+     //
+@@ -188,6 +193,11 @@
+         // sure the packet was correctly transmitted.
+         //
+     }
++
++    if(!bIntsOff)
++    {
++        IntMasterEnable();
++    }
+ }
+ 
+ //*****************************************************************************
+@@ -1190,3 +1200,5 @@
+ //! @}
+ //
+ //*****************************************************************************
++
++#endif
